@@ -26,6 +26,7 @@ import (
 	"time"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
+	"go.pinniped.dev/pkg/oidcclient/pkce"
 	"golang.org/x/oauth2"
 
 	"github.com/goharbor/harbor/src/common"
@@ -145,7 +146,7 @@ func getOauthConf(ctx context.Context) (*oauth2.Config, error) {
 
 // AuthCodeURL returns the URL for OIDC provider's consent page.  The state should be verified when user is redirected
 // back to Harbor.
-func AuthCodeURL(ctx context.Context, state string) (string, error) {
+func AuthCodeURL(ctx context.Context, state string, code *pkce.Code) (string, error) {
 	conf, err := getOauthConf(ctx)
 	if err != nil {
 		log.Errorf("Failed to get OAuth configuration, error: %v", err)
@@ -157,6 +158,7 @@ func AuthCodeURL(ctx context.Context, state string) (string, error) {
 		log.Errorf("Failed to get OIDC configuration, error: %v", err)
 		return "", err
 	}
+	// Any extra confic settings to pass.
 	for k, v := range setting.ExtraRedirectParms {
 		options = append(options, oauth2.SetAuthURLParam(k, v))
 	}
@@ -164,11 +166,15 @@ func AuthCodeURL(ctx context.Context, state string) (string, error) {
 		options = append(options, oauth2.AccessTypeOffline)
 		options = append(options, oauth2.SetAuthURLParam("prompt", "consent"))
 	}
+	// Send the challenge and the method. Keep verifier.
+	options = append(options, code.Challenge())
+	options = append(options, code.Method())
+
 	return conf.AuthCodeURL(state, options...), nil
 }
 
 // ExchangeToken get the token from token provider via the code
-func ExchangeToken(ctx context.Context, code string) (*Token, error) {
+func ExchangeToken(ctx context.Context, code string, verifier *pkce.Code) (*Token, error) {
 	oauth, err := getOauthConf(ctx)
 	if err != nil {
 		log.Errorf("Failed to get OAuth configuration, error: %v", err)
@@ -180,7 +186,7 @@ func ExchangeToken(ctx context.Context, code string) (*Token, error) {
 		return nil, err
 	}
 	ctx = clientCtx(ctx, setting.VerifyCert)
-	oauthToken, err := oauth.Exchange(ctx, code)
+	oauthToken, err := oauth.Exchange(ctx, code, verifier.Verifier())
 	if err != nil {
 		return nil, err
 	}

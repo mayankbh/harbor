@@ -30,12 +30,15 @@ import (
 	"github.com/goharbor/harbor/src/lib/errors"
 	"github.com/goharbor/harbor/src/lib/log"
 	"github.com/goharbor/harbor/src/pkg/oidc"
+
+	"go.pinniped.dev/pkg/oidcclient/pkce"
 )
 
 const tokenKey = "oidc_token"
 const stateKey = "oidc_state"
 const userInfoKey = "oidc_user_info"
 const redirectURLKey = "oidc_redirect_url"
+const pkceCodeVerifierKey = "code_verifier"
 const oidcUserComment = "Onboarded via OIDC provider"
 
 // OIDCController handles requests for OIDC login, callback and user onboard
@@ -58,7 +61,13 @@ func (oc *OIDCController) Prepare() {
 // RedirectLogin redirect user's browser to OIDC provider's login page
 func (oc *OIDCController) RedirectLogin() {
 	state := utils.GenerateRandomString()
-	url, err := oidc.AuthCodeURL(oc.Context(), state)
+	code, err := pkce.Generate()
+	if err != nil {
+		log.Errorf("failed to generate PKCE code", err)
+		oc.SendInternalServerError(err)
+	}
+	// Built out the authorization code URL.
+	url, err := oidc.AuthCodeURL(oc.Context(), state, &code)
 	if err != nil {
 		oc.SendInternalServerError(err)
 		return
@@ -68,8 +77,14 @@ func (oc *OIDCController) RedirectLogin() {
 		oc.SendInternalServerError(err)
 		return
 	}
+	// Cache state. To be compared later.
 	if err := oc.SetSession(stateKey, state); err != nil {
 		log.Errorf("failed to set session for key: %s, error: %v", stateKey, err)
+		oc.SendInternalServerError(err)
+		return
+	}
+	if err := oc.SetSession(pkceCodeVerifierKey, code.Verifier()); err != nil {
+		log.Errorf("failed to set session for key: %s, error: %v", pkceCodeVerifierKey, err)
 		oc.SendInternalServerError(err)
 		return
 	}
@@ -105,9 +120,24 @@ func (oc *OIDCController) Callback() {
 			return
 		}
 	}
+	verifierRaw := oc.GetSession(pkceCodeVerifierKey)
+	if verifierRaw == nil {
+		err := fmt.Errorf("failed to find verifier for session")
+		log.Errorf("failed to delete session for key:%s, error: %v", redirectURLKey, err)
+		oc.SendInternalServerError(err)
+		return
+	}
+	verifier, ok := verifierRaw.(*pkce.Code)
+	if !ok {
+		err := fmt.Errorf("unexpected type for verifier")
+		log.Errorf("failed to delete session for key:%s, error: %v", redirectURLKey, err)
+		oc.SendInternalServerError(err)
+		return
+	}
+
 	code := oc.Ctx.Request.URL.Query().Get("code")
 	ctx := oc.Ctx.Request.Context()
-	token, err := oidc.ExchangeToken(ctx, code)
+	token, err := oidc.ExchangeToken(ctx, code, verifier)
 	if err != nil {
 		log.Errorf("Failed to exchange token, error: %v", err)
 		// Return a 4xx error so user can see the details in case it's due to misconfiguration.
